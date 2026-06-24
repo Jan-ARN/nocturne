@@ -1,44 +1,92 @@
 import * as Tone from 'tone'
-import { Drone } from './voices/Drone'
+import { Drums } from './voices/Drums'
+import { Chords } from './voices/Chords'
+import { Bass } from './voices/Bass'
 import { Melody } from './voices/Melody'
-import { Texture } from './voices/Texture'
-import { Scheduler } from './scheduler'
-import { buildScalePool } from './scales'
-import type { NoteEvent, NoteListener } from './events'
+import { Sequencer } from './sequencer'
+import {
+  GENRES, makeKit, makeTimbres,
+  type DrumKitConfig, type Genre, type GenreId, type GrooveId, type Layer, type TrackTimbres,
+} from './genres'
+import type { ScaleName } from './scales'
+import type { Energy, NoteEvent, NoteListener, SectionListener } from './events'
 import type { Preset } from '../presets/presets'
+
+/** A snapshot of what the engine is currently playing, for the UI. */
+export interface TrackInfo {
+  genre: GenreId
+  groove: GrooveId
+  bpm: number
+  pitchClass: number
+  scale: ScaleName
+  instruments: { chords: string; bass: string; lead: string }
+}
+
+const FFT_SIZE = 32
 
 /**
  * Owns the whole audio graph and its lifecycle.
  *
- * Signal flow:  voices → bus → filter → reverb → limiter → master → speakers
+ * Signal flow:  voices → bus → pump → chorus → warmth filter → reverb → comp → limiter → master
  *
- * The master chain is built once (lazily, after the first user gesture, because
- * the reverb impulse must be generated asynchronously). Voices and the scheduler
- * are torn down and rebuilt per preset so each mood gets its own oscillators.
+ * The master chain is built once (lazily, after the first user gesture, since the
+ * reverb impulse generates asynchronously). FX parameters (chorus, reverb, pump,
+ * filter) are reconfigured per genre. The `pump` gain is ducked by every kick for
+ * the house sidechain. An analyser on the master feeds the audio-reactive visual.
  */
 export class AudioEngine {
   private built = false
   private playing = false
 
   private bus!: Tone.Gain
-  private filter!: Tone.Filter
+  private pump!: Tone.Gain
+  private chorus!: Tone.Chorus
+  private warmth!: Tone.Filter
   private reverb!: Tone.Reverb
+  private comp!: Tone.Compressor
   private limiter!: Tone.Limiter
   private master!: Tone.Gain
+  private analyser!: Tone.Analyser
 
-  private drone: Drone | null = null
+  private drums: Drums | null = null
+  private chords: Chords | null = null
+  private bass: Bass | null = null
   private melody: Melody | null = null
-  private texture: Texture | null = null
-  private scheduler: Scheduler | null = null
+  private sequencer: Sequencer | null = null
 
   private stopTimer: number | null = null
 
-  // Macro state. Density is read live by the scheduler; volume/space drive nodes.
   private density = 0.5
   private space = 0.5
   private volume = 0.7
 
+  // The currently loaded preset, for genre-aware Shuffle re-rolls.
+  private current: Preset | null = null
+
+  // Mutable per-track state. The preset seeds these; Shuffle re-rolls them so the
+  // instruments, scale, key and tempo all change — not just the note sequence.
+  private genre: Genre = GENRES.lofi
+  private scale: ScaleName = 'minorPentatonic'
+  private timbres: TrackTimbres = makeTimbres('lofi')
+  private kit: DrumKitConfig = GENRES.lofi.kit
+  private bpm = 82
+
+  // Key.
+  private octaveBase = 36
+  private pitchClass = 0
+
+  // Per-genre FX state, applied to the shared chain.
+  private baseWarmth = 3600
+  private reverbMin = 0.12
+  private reverbMax = 0.55
+  private pumpDepth = 0
+  private pumpRecovery = 0.25
+
+  private readonly muted = new Set<Layer>()
   private readonly listeners = new Set<NoteListener>()
+  private readonly sectionListeners = new Set<SectionListener>()
+
+  private readonly energy: Energy = { level: 0, bass: 0, mid: 0, high: 0 }
 
   get isPlaying(): boolean {
     return this.playing
@@ -49,32 +97,47 @@ export class AudioEngine {
     return () => this.listeners.delete(listener)
   }
 
+  onSection(listener: SectionListener): () => void {
+    this.sectionListeners.add(listener)
+    return () => this.sectionListeners.delete(listener)
+  }
+
   private emit = (event: NoteEvent): void => {
     for (const listener of this.listeners) listener(event)
   }
 
+  private emitSection = (name: string): void => {
+    for (const listener of this.sectionListeners) listener(name)
+  }
+
   private async build(): Promise<void> {
     this.bus = new Tone.Gain(1)
-    this.filter = new Tone.Filter({ type: 'lowpass', frequency: 4000, Q: 0.4 })
-    this.reverb = new Tone.Reverb({ decay: 9, preDelay: 0.03, wet: 0.5 })
-    // Generate the impulse response before any audio reaches the reverb.
+    this.pump = new Tone.Gain(1)
+    this.chorus = new Tone.Chorus({ frequency: 1.1, delayTime: 3.5, depth: 0.6, wet: 0.28 }).start()
+    this.warmth = new Tone.Filter({ type: 'lowpass', frequency: 3600, Q: 0.3 })
+    this.reverb = new Tone.Reverb({ decay: 3, preDelay: 0.02, wet: 0.25 })
     await this.reverb.generate()
-    this.limiter = new Tone.Limiter(-2)
+    this.comp = new Tone.Compressor({ threshold: -20, ratio: 3, attack: 0.01, release: 0.18 })
+    this.limiter = new Tone.Limiter(-1.5)
     this.master = new Tone.Gain(0)
+    this.analyser = new Tone.Analyser('fft', FFT_SIZE)
 
     this.bus.chain(
-      this.filter,
+      this.pump,
+      this.chorus,
+      this.warmth,
       this.reverb,
+      this.comp,
       this.limiter,
       this.master,
       Tone.getDestination(),
     )
+    this.master.connect(this.analyser)
     this.built = true
   }
 
   /** Start (or restart) playback with a preset. Call from a user gesture. */
   async start(preset: Preset): Promise<void> {
-    // Resume the AudioContext — must originate from a user gesture.
     await Tone.start()
     if (!this.built) await this.build()
 
@@ -83,44 +146,47 @@ export class AudioEngine {
       this.stopTimer = null
     }
 
+    this.loadTrackState(preset)
     this.density = preset.density
     this.space = preset.space
-
-    this.buildVoices(preset)
-    this.applySpace(0.1)
+    this.applyGenreFx(preset, 0.1)
+    this.buildVoices()
 
     const transport = Tone.getTransport()
     transport.bpm.value = preset.bpm
+    transport.swing = GENRES[preset.genre].swing
+    transport.swingSubdivision = '8n'
     transport.start()
 
     this.playing = true
-    // Fade up from silence to the current volume.
     this.master.gain.cancelScheduledValues(Tone.now())
-    this.master.gain.rampTo(this.volume, 1.5)
+    this.master.gain.rampTo(this.volume, 1.2)
   }
 
   stop(): void {
     if (!this.playing) return
     this.playing = false
-    this.master.gain.rampTo(0, 1.2)
+    this.master.gain.rampTo(0, 1)
 
-    // Let the fade finish before tearing the graph down.
     this.stopTimer = window.setTimeout(() => {
       const transport = Tone.getTransport()
       transport.stop()
       transport.cancel()
       this.teardownVoices()
       this.stopTimer = null
-    }, 1400)
+    }, 1200)
   }
 
-  /** Switch mood live, crossfading the bed and re-voicing the performance. */
+  /** Switch vibe/genre live, crossfading and re-keying the groove. */
   setPreset(preset: Preset): void {
     if (!this.playing) return
+    this.loadTrackState(preset)
     this.teardownVoices()
-    this.buildVoices(preset)
-    Tone.getTransport().bpm.rampTo(preset.bpm, 2)
-    this.applySpace(1.5)
+    this.applyGenreFx(preset, 1.5)
+    this.buildVoices()
+    const transport = Tone.getTransport()
+    transport.bpm.rampTo(preset.bpm, 2)
+    transport.swing = GENRES[preset.genre].swing
   }
 
   setVolume(value: number): void {
@@ -132,49 +198,189 @@ export class AudioEngine {
     this.density = value
   }
 
+  /**
+   * Shuffle: re-roll tempo, key, scale AND the instruments within the genre's
+   * ranges, then rebuild the voices so a fresh take really sounds different — new
+   * patches, new palette, not just a new note sequence. Returns the new tempo/key
+   * so the UI can stay in sync.
+   */
+  skip(): { bpm: number; pitchClass: number } | null {
+    if (!this.playing || !this.current) return null
+
+    const [lo, hi] = this.genre.tempoRange
+    const bpm = Math.round(lo + Math.random() * (hi - lo))
+    this.bpm = bpm
+    Tone.getTransport().bpm.rampTo(bpm, 0.6)
+
+    this.pitchClass = Math.floor(Math.random() * 12)
+    this.scale = this.genre.scales[Math.floor(Math.random() * this.genre.scales.length)]
+    this.timbres = makeTimbres(this.genre.id)
+    this.kit = makeKit(this.genre.id)
+
+    this.teardownVoices()
+    this.buildVoices()
+    this.sequencer?.prime()
+    return { bpm, pitchClass: this.pitchClass }
+  }
+
+  /** Seed the per-track state from a preset, then randomize its instruments. */
+  private loadTrackState(preset: Preset): void {
+    this.current = preset
+    this.genre = GENRES[preset.genre]
+    this.scale = preset.scale
+    this.bpm = preset.bpm
+    const presetRoot = Tone.Frequency(preset.root).toMidi()
+    this.octaveBase = presetRoot - (presetRoot % 12)
+    this.pitchClass = presetRoot % 12
+    this.timbres = makeTimbres(this.genre.id)
+    this.kit = makeKit(this.genre.id)
+  }
+
+  /** What's playing right now — genre, key, scale, tempo and the instruments. */
+  getTrackInfo(): TrackInfo {
+    return {
+      genre: this.genre.id,
+      groove: this.genre.groove,
+      bpm: this.bpm,
+      pitchClass: this.pitchClass,
+      scale: this.scale,
+      instruments: {
+        chords: this.timbres.chord.label,
+        bass: this.timbres.bass.label,
+        lead: this.timbres.lead.label,
+      },
+    }
+  }
+
   setSpace(value: number): void {
     this.space = value
-    this.applySpace(0.4)
+    if (this.built) this.reverb.wet.rampTo(this.reverbMin + this.space * (this.reverbMax - this.reverbMin), 0.4)
   }
 
-  /** Map the space macro onto reverb wetness and filter brightness. */
-  private applySpace(ramp: number): void {
+  setTempo(bpm: number): void {
+    if (this.built) Tone.getTransport().bpm.rampTo(bpm, 0.1)
+  }
+
+  setSwing(value: number): void {
+    if (this.built) Tone.getTransport().swing = value
+  }
+
+  /** Transpose to a pitch class (0 = C … 11 = B) in the current register. */
+  setKey(pitchClass: number): void {
+    this.pitchClass = pitchClass
+    this.sequencer?.setRoot(this.octaveBase + pitchClass)
+  }
+
+  setMute(layer: Layer, muted: boolean): void {
+    if (muted) this.muted.add(layer)
+    else this.muted.delete(layer)
+    this.voiceFor(layer)?.setMuted(muted)
+  }
+
+  /** Normalized spectrum energy for the visual. Sampled fresh each call. */
+  getEnergy(): Energy {
+    if (!this.built || !this.playing) {
+      this.energy.level = this.energy.bass = this.energy.mid = this.energy.high = 0
+      return this.energy
+    }
+    const values = this.analyser.getValue() as Float32Array
+    const norm = (db: number) => Math.min(1, Math.max(0, (db + 100) / 75))
+    let bass = 0
+    let mid = 0
+    let high = 0
+    for (let i = 0; i < 4; i++) bass += norm(values[i])
+    for (let i = 4; i < 14; i++) mid += norm(values[i])
+    for (let i = 14; i < values.length; i++) high += norm(values[i])
+    this.energy.bass = bass / 4
+    this.energy.mid = mid / 10
+    this.energy.high = high / (values.length - 14)
+    this.energy.level = (this.energy.bass + this.energy.mid + this.energy.high) / 3
+    return this.energy
+  }
+
+  // ── Internals ────────────────────────────────────────────────────────
+
+  /** Sidechain duck — called by the sequencer on every kick. */
+  private duck = (time: number): void => {
+    if (this.pumpDepth <= 0) return
+    const g = this.pump.gain
+    g.cancelScheduledValues(time)
+    g.setValueAtTime(1, time)
+    g.linearRampToValueAtTime(1 - this.pumpDepth, time + 0.012)
+    g.linearRampToValueAtTime(1, time + this.pumpRecovery)
+  }
+
+  /** Arrangement-driven filter sweep, 0 (muffled) .. 1 (fully open). */
+  private setFilterOpenness = (openness: number, ramp: number): void => {
     if (!this.built) return
-    const wet = 0.18 + this.space * 0.7
-    // More space → darker and more distant; less space → close and bright.
-    const cutoff = 1400 + (1 - this.space) * 5600
-    this.reverb.wet.rampTo(wet, ramp)
-    this.filter.frequency.rampTo(cutoff, ramp)
+    this.warmth.frequency.rampTo(this.baseWarmth * (0.32 + 0.68 * openness), ramp)
   }
 
-  private buildVoices(preset: Preset): void {
-    const rootMidi = Tone.Frequency(preset.root).toMidi()
+  private applyGenreFx(preset: Preset, ramp: number): void {
+    if (!this.built) return
+    const fx = GENRES[preset.genre].fx
+    this.baseWarmth = preset.warmth
+    this.reverbMin = fx.reverbMin
+    this.reverbMax = fx.reverbMax
+    this.pumpDepth = fx.pump
+    this.pumpRecovery = fx.pumpRecovery
+    this.chorus.wet.rampTo(fx.chorusWet, ramp)
+    this.warmth.frequency.rampTo(preset.warmth, ramp)
+    this.reverb.wet.rampTo(this.reverbMin + this.space * (this.reverbMax - this.reverbMin), ramp)
+  }
 
-    this.drone = new Drone(this.bus, rootMidi, preset.drone)
-    this.melody = new Melody(this.bus, preset.melody)
-    this.texture = new Texture(this.bus, preset.texture)
+  private voiceFor(layer: Layer): { setMuted(m: boolean): void } | null {
+    switch (layer) {
+      case 'drums':
+        return this.drums
+      case 'chords':
+        return this.chords
+      case 'bass':
+        return this.bass
+      case 'lead':
+        return this.melody
+    }
+  }
 
-    this.scheduler = new Scheduler({
+  private buildVoices(): void {
+    const rootMidi = this.octaveBase + this.pitchClass
+
+    this.drums = new Drums(this.bus, this.kit)
+    this.chords = new Chords(this.bus, this.timbres.chord)
+    this.bass = new Bass(this.bus, this.timbres.bass)
+    this.melody = new Melody(this.bus, this.timbres.lead)
+
+    for (const layer of this.muted) this.voiceFor(layer)?.setMuted(true)
+
+    this.sequencer = new Sequencer({
+      genre: this.genre,
+      drums: this.drums,
+      chords: this.chords,
+      bass: this.bass,
       melody: this.melody,
-      texture: this.texture,
-      // Melody sits an octave above the bed; texture two octaves up.
-      melodyPool: buildScalePool(rootMidi + 12, preset.scale, 3),
-      texturePool: buildScalePool(rootMidi + 24, preset.scale, 2),
+      rootMidi,
+      scale: this.scale,
       getDensity: () => this.density,
+      isMuted: (layer) => this.muted.has(layer),
       emit: this.emit,
+      duck: this.duck,
+      setFilterOpenness: this.setFilterOpenness,
+      onSection: this.emitSection,
     })
-    this.scheduler.start()
+    this.sequencer.start()
   }
 
   private teardownVoices(): void {
-    this.scheduler?.stop()
-    this.drone?.dispose()
+    this.sequencer?.stop()
+    this.drums?.dispose()
+    this.chords?.dispose()
+    this.bass?.dispose()
     this.melody?.dispose()
-    this.texture?.dispose()
-    this.scheduler = null
-    this.drone = null
+    this.sequencer = null
+    this.drums = null
+    this.chords = null
+    this.bass = null
     this.melody = null
-    this.texture = null
   }
 
   /** Release everything. Used on unmount. */
@@ -185,11 +391,16 @@ export class AudioEngine {
       Tone.getTransport().stop()
       Tone.getTransport().cancel()
       this.bus.dispose()
-      this.filter.dispose()
+      this.pump.dispose()
+      this.chorus.dispose()
+      this.warmth.dispose()
       this.reverb.dispose()
+      this.comp.dispose()
       this.limiter.dispose()
       this.master.dispose()
+      this.analyser.dispose()
     }
     this.listeners.clear()
+    this.sectionListeners.clear()
   }
 }

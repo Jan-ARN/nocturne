@@ -1,15 +1,16 @@
 import type { CSSProperties } from 'react'
-import { PRESETS, type Preset } from '../presets/presets'
+import type { Preset } from '../presets/presets'
 
 interface PresetPickerProps {
+  presets: Preset[]
   current: Preset
   onSelect: (preset: Preset) => void
 }
 
-export function PresetPicker({ current, onSelect }: PresetPickerProps) {
+export function PresetPicker({ presets, current, onSelect }: PresetPickerProps) {
   return (
-    <div className="presets" role="radiogroup" aria-label="Mood">
-      {PRESETS.map((preset) => {
+    <div className="presets" role="radiogroup" aria-label="Vibe">
+      {presets.map((preset) => {
         const active = preset.id === current.id
         return (
           <button

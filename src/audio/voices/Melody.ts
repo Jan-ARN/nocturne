@@ -1,53 +1,54 @@
 import * as Tone from 'tone'
 import { midiToFreq } from '../scales'
-
-export interface MelodyConfig {
-  waveform: OscillatorType
-  /** Output level, 0..1. */
-  level: number
-  /** Soft attack in seconds — long attacks keep notes from poking out. */
-  attack: number
-  /** Long release in seconds — notes bloom into the reverb tail. */
-  release: number
-}
+import { buildPoly, type PatchSpec } from '../patches'
 
 /**
- * Sparse, soft procedural notes. The scheduler decides when one fires and which
- * scale degree it is; this voice just plays it gently and polyphonically so
- * overlapping notes ring together.
+ * The lead line. Used a few ways depending on groove: sparse sprinkles over beats,
+ * a continuous arpeggio for synthwave, a repetitive motif (often with a dubby
+ * delay) for house, or slow bell tones in ambient. Whatever instrument the track
+ * drew — Bell, Glass, Marimba, Pluck, Harp — always lands on scale/chord tones.
  */
 export class Melody {
   private readonly out: Tone.Gain
-  private readonly synth: Tone.PolySynth<Tone.Synth>
+  private readonly level: number
+  private readonly synth: Tone.PolySynth
+  private readonly delay: Tone.FeedbackDelay | null
   private disposed = false
 
-  constructor(dest: Tone.InputNode, cfg: MelodyConfig) {
-    this.out = new Tone.Gain(cfg.level).connect(dest)
-    this.synth = new Tone.PolySynth(Tone.Synth, {
-      oscillator: { type: cfg.waveform },
-      envelope: {
-        attack: cfg.attack,
-        decay: 0.4,
-        sustain: 0.25,
-        release: cfg.release,
-      },
-      volume: -8,
-    }).connect(this.out)
-    this.synth.maxPolyphony = 24
+  constructor(dest: Tone.InputNode, spec: PatchSpec, level = 0.42) {
+    this.level = level
+    this.out = new Tone.Gain(level).connect(dest)
+
+    if (spec.delay) {
+      this.delay = new Tone.FeedbackDelay({
+        delayTime: spec.delay.time,
+        feedback: spec.delay.feedback,
+        wet: spec.delay.wet,
+      }).connect(this.out)
+    } else {
+      this.delay = null
+    }
+
+    this.synth = buildPoly(spec, 16).connect(this.delay ?? this.out)
   }
 
-  /** Trigger a MIDI note at audio-clock `time` with the given 0..1 velocity. */
-  trigger(midi: number, time: number, velocity: number): void {
+  trigger(midi: number, time: number, velocity: number, duration: Tone.Unit.Time = '4n'): void {
     if (this.disposed) return
-    this.synth.triggerAttackRelease(midiToFreq(midi), '2n', time, velocity)
+    this.synth.triggerAttackRelease(midiToFreq(midi), duration, time, velocity)
   }
 
-  dispose(fade = 1.5): void {
+  setMuted(muted: boolean): void {
+    if (this.disposed) return
+    this.out.gain.rampTo(muted ? 0 : this.level, 0.08)
+  }
+
+  dispose(fade = 1.2): void {
     if (this.disposed) return
     this.disposed = true
     this.out.gain.rampTo(0, fade)
     window.setTimeout(() => {
       this.synth.dispose()
+      this.delay?.dispose()
       this.out.dispose()
     }, fade * 1000 + 200)
   }

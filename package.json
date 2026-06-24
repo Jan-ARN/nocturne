@@ -3,7 +3,7 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Endless, generative, calm ambient soundscapes in the browser.",
+  "description": "Endless, generative music in the browser — nine genres, synthesized live.",
   "license": "MIT",
   "scripts": {
     "dev": "vite",
