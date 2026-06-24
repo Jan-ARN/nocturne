@@ -1,7 +1,6 @@
-// Drum-pattern banks. Instead of hardcoding kick/snare placement into the step
-// loop (which made every bar of a genre identical), each genre has a bank of
-// rhythmic skeletons. The sequencer draws one per phrase and mutates it, so the
-// groove itself reshapes over a session — not just the velocities on top.
+// Drum-pattern banks. Each genre has a set of rhythmic skeletons; the sequencer
+// draws a fresh one each phrase, so the groove itself shifts over a session rather
+// than only the velocities on top.
 
 import type { GenreId } from './genres'
 

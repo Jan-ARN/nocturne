@@ -1,23 +1,21 @@
-// The composition engine. Rather than loop one hardcoded progression and motif
-// forever, the sequencer asks this module for fresh material continuously:
+// Composition. The sequencer pulls fresh material from here continuously instead
+// of looping a fixed progression and motif:
 //
-//   • chord progressions walked over a functional-harmony transition table, then
-//     *voiced* — quality (triad / 7th / 9th) chosen per genre, inversions picked
-//     by nearest-note voice leading so chords glide instead of jumping,
-//   • a melodic theme (a shaped contour over the scale ladder, with rests, leaps
-//     and passing tones) that is then *developed* bar by bar — transposed,
-//     inverted, truncated — so a line has identity yet never sits still,
-//   • whole-track arrangements assembled from a block vocabulary, so the macro
-//     shape (section order, lengths, energy arc) differs every time too.
+//   - chord progressions walked over a functional-harmony table, then voiced
+//     (quality picked per genre, inversions by nearest-note voice leading);
+//   - a melodic theme (a shaped contour over the scale) developed bar by bar;
+//   - whole-track arrangements assembled from a vocabulary of section blocks.
 //
-// Consonance still comes for free — chords are diatonic, the melody rides the
-// scale and snaps to chord tones on strong beats — but nothing is fixed, so two
-// takes never share a progression, a melody, or a structure.
+// Chords stay diatonic and the melody snaps to chord tones on strong beats, so
+// the output stays consonant without anything being fixed.
 
-import type { ScaleName } from './scales'
+import { OCTAVE, pitchClass, type ScaleName } from './scales'
 import type { HarmonyProfile } from './genres'
 
 export type Mode = 'major' | 'minor'
+
+// A ninth above the root: an octave plus a whole tone.
+const NINTH = OCTAVE + 2
 
 const MINOR_SCALES = new Set<ScaleName>(['minorPentatonic', 'kumoi', 'dorian', 'aeolian', 'phrygian'])
 
@@ -51,7 +49,8 @@ const MAJOR_CHORDS: Record<string, number[]> = {
   vi: [9, 12, 16, 19],
 }
 
-// Where each chord tends to move next — the heart of "sounds intentional".
+// Where each chord tends to move next. This is what makes a progression feel
+// intentional rather than random.
 const MINOR_NEXT: Record<string, string[]> = {
   i: ['VI', 'iv', 'VII', 'III', 'v'],
   III: ['VI', 'iv', 'VII'],
@@ -70,8 +69,8 @@ const MAJOR_NEXT: Record<string, string[]> = {
   vi: ['IV', 'ii', 'V', 'iii'],
 }
 
-// Where a progression may begin — weighted toward the tonic but not always, so
-// every regeneration can open on a different chord.
+// Where a progression can start. Weighted toward the tonic, but not always, so
+// regenerations open on different chords.
 const MINOR_STARTS = ['i', 'i', 'i', 'VI', 'iv', 'III', 'VII']
 const MAJOR_STARTS = ['I', 'I', 'I', 'vi', 'IV', 'ii']
 
@@ -86,15 +85,15 @@ export interface ChordSpec {
 
 /** Drop to a triad and/or add a 9th, per the genre's harmonic taste. */
 function applyQuality(base: number[], h: HarmonyProfile): number[] {
-  let out = Math.random() < h.seventh ? base.slice() : base.slice(0, 3)
-  if (Math.random() < h.ninth) out.push(base[0] + 14)
+  const out = Math.random() < h.seventh ? base.slice() : base.slice(0, 3)
+  if (Math.random() < h.ninth) out.push(base[0] + NINTH)
   return out
 }
 
 /** Rotate the lowest `k` notes up an octave (an inversion). */
 function invert(offsets: number[], k: number): number[] {
   const out = offsets.slice()
-  for (let i = 0; i < k; i++) out.push(out.shift()! + 12)
+  for (let i = 0; i < k; i++) out.push(out.shift()! + OCTAVE)
   return out
 }
 
@@ -103,9 +102,8 @@ const VOICE_LOW = 6
 const VOICE_HIGH = 30
 
 /**
- * Pick the inversion (and octave placement) whose top note is closest to the
- * previous chord's top — smooth voice leading, the thing that makes a sequence of
- * chords sound deliberately played rather than stamped out in root position.
+ * Pick the inversion and octave placement whose top note is closest to the
+ * previous chord's top, so the chords glide instead of jumping in root position.
  */
 function voiceLead(offsets: number[], prevTop: number | null): number[] {
   const candidates: number[][] = []
@@ -149,7 +147,7 @@ export function generateProgression(mode: Mode, harmony: HarmonyProfile, length 
     out.push({
       offsets: voiced,
       rootOffset: base[0],
-      pitchClasses: base.map((o) => ((o % 12) + 12) % 12),
+      pitchClasses: base.map(pitchClass),
     })
     degree = pick(next[degree])
   }
@@ -193,10 +191,10 @@ function contourAt(shape: Shape, t: number, center: number, amp: number): number
 }
 
 /**
- * Generate a melodic theme: a rhythm (which steps), then a contour over the scale
- * ladder. The walk mostly steps, occasionally leaps, follows an overall shape, and
- * leaves rests — so it reads as a phrase with a memorable arc rather than a flat
- * random sprinkle. `poolSize` is the size of the sequencer's scale ladder.
+ * Generate a melodic theme: pick a rhythm (which steps fire), then walk a contour
+ * over the scale ladder. The walk mostly steps, occasionally leaps, and follows an
+ * overall shape, so it reads as a phrase rather than random notes. `poolSize` is
+ * the length of the sequencer's scale ladder.
  */
 export function generateMotif(poolSize: number, density: number, maxNotes: number): Motif {
   const count = clampInt(Math.round(2 + density * (maxNotes - 1)), 2, maxNotes)
@@ -232,9 +230,9 @@ export function generateMotif(poolSize: number, density: number, maxNotes: numbe
 }
 
 /**
- * Develop a theme for a given repetition: identity, transposition, contour
- * inversion, octave lift, or truncation. The ear hears the same idea returning,
- * subtly changed — variation, not a brand-new line every bar.
+ * Vary a theme for a given repetition: leave it, transpose it, lift the tail an
+ * octave, truncate it, or invert the contour. Same idea returning, changed —
+ * variation rather than a new line every bar.
  */
 export function developMotif(theme: Motif, variation: number, poolSize: number): Motif {
   const v = ((variation % 6) + 6) % 6
@@ -305,10 +303,9 @@ const peak = (): Section => ({
 })
 
 /**
- * Assemble a whole-track structure from the block vocabulary. `first` arrangements
- * open with an Intro; later ones (each time the structure loops) skip straight in.
- * Which blocks appear, their order, lengths and energy all vary — so the macro
- * shape is never the same twice.
+ * Assemble a track structure from the section blocks. The first arrangement opens
+ * with an intro; later ones (each time the structure loops) skip straight in.
+ * Which blocks appear, their order, lengths and energy all vary.
  */
 export function generateArrangement(first: boolean): Section[] {
   const out: Section[] = []
@@ -319,7 +316,7 @@ export function generateArrangement(first: boolean): Section[] {
   if (Math.random() < 0.6) out.push(breakdown())
   if (Math.random() < 0.7) out.push(build())
   if (Math.random() < 0.5) out.push(peak())
-  // Guarantee enough material that the structure doesn't whip past in a few bars.
+  // Make sure there's enough material that the structure doesn't fly past.
   if (out.reduce((n, s) => n + s.bars, 0) < 12) out.push(groove())
   return out
 }

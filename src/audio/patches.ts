@@ -1,12 +1,9 @@
-// Instrument synthesis. The single biggest reason every track sounded alike was
-// that every voice was a plain oscillator (`Tone.Synth`) — a detuned triangle is
-// still a triangle. Real timbral range comes from different *synthesis engines*:
-// FM (electric pianos, bells, metallic plucks), AM (hollow/vocal tones), and the
-// classic subtractive mono bass. This module defines a `PatchSpec` (engine +
-// parameters + a human label) and a set of named instrument *archetypes* — each a
-// recipe with a little controlled randomness — plus factories that turn a spec
-// into a live Tone node. A genre lists which archetypes it may use; every track
-// draws fresh ones, so two takes rarely share an instrument.
+// Instrument synthesis. Timbral range comes from using different synthesis
+// engines, not just different waveforms: FM for electric pianos, bells and
+// metallic plucks, AM for hollow/vocal tones, and subtractive mono for bass.
+// A PatchSpec describes one sound; the archetypes below are recipes with a bit of
+// built-in randomness; the factories turn a spec into a live Tone node. A genre
+// lists the archetypes it can draw from, and each track draws fresh ones.
 
 import * as Tone from 'tone'
 
@@ -50,8 +47,8 @@ export type Archetype =
   // bass
   | 'sub' | 'round' | 'reece' | 'acid' | 'fmbass'
 
-// Each recipe centers a sound and jitters it, so "Rhodes" is recognizably a
-// Rhodes every time but never the identical patch twice.
+// Each recipe centers a sound and jitters it, so a Rhodes is always recognizably
+// a Rhodes but never the exact same patch twice.
 const RECIPES: Record<Archetype, () => PatchSpec> = {
   rhodes: () => ({
     engine: 'fm', waveform: 'sine', harmonicity: choose([1, 2, 3]), modulationIndex: rand(1.5, 3.5), modulation: 'sine',
@@ -139,39 +136,50 @@ export function makePatch(arch: Archetype): PatchSpec {
 
 const CLASS = { synth: Tone.Synth, fm: Tone.FMSynth, am: Tone.AMSynth, mono: Tone.MonoSynth } as const
 
-function toneOptions(spec: PatchSpec): Record<string, unknown> {
+// Each engine takes a different option shape; the keys that don't belong to plain
+// SynthOptions (FM/AM modulation, the mono filter) force a single cast here. We
+// build into one object and loosen it once, so callers don't have to cast.
+function toneOptions(spec: PatchSpec): Partial<Tone.SynthOptions> {
   const env = spec.envelope
-  const detune = spec.detune ?? 0
+  const opts: Record<string, unknown> = {
+    oscillator: { type: spec.waveform },
+    envelope: env,
+    detune: spec.detune ?? 0,
+    volume: spec.volume,
+  }
   switch (spec.engine) {
     case 'fm':
-      return {
-        harmonicity: spec.harmonicity ?? 2, modulationIndex: spec.modulationIndex ?? 6,
-        oscillator: { type: spec.waveform }, modulation: { type: spec.modulation ?? 'sine' },
-        envelope: env, modulationEnvelope: { attack: env.attack + 0.01, decay: 0.2, sustain: 0.3, release: env.release },
-        detune, volume: spec.volume,
-      }
-    case 'am':
-      return {
+      Object.assign(opts, {
         harmonicity: spec.harmonicity ?? 2,
-        oscillator: { type: spec.waveform }, modulation: { type: spec.modulation ?? 'square' },
-        envelope: env, modulationEnvelope: { attack: env.attack + 0.01, decay: 0.2, sustain: 0.5, release: env.release },
-        detune, volume: spec.volume,
-      }
+        modulationIndex: spec.modulationIndex ?? 6,
+        modulation: { type: spec.modulation ?? 'sine' },
+        modulationEnvelope: { attack: env.attack + 0.01, decay: 0.2, sustain: 0.3, release: env.release },
+      })
+      break
+    case 'am':
+      Object.assign(opts, {
+        harmonicity: spec.harmonicity ?? 2,
+        modulation: { type: spec.modulation ?? 'square' },
+        modulationEnvelope: { attack: env.attack + 0.01, decay: 0.2, sustain: 0.5, release: env.release },
+      })
+      break
     case 'mono':
-      return {
-        oscillator: { type: spec.waveform }, envelope: env,
+      Object.assign(opts, {
         filterEnvelope: { attack: 0.02, decay: 0.2, sustain: 0.4, baseFrequency: spec.filterBase ?? 150, octaves: spec.filterOctaves ?? 2 },
-        filter: { Q: spec.filterQ ?? 1 }, detune, volume: spec.volume,
-      }
-    default:
-      return { oscillator: { type: spec.waveform }, envelope: env, detune, volume: spec.volume }
+        filter: { Q: spec.filterQ ?? 1 },
+      })
+      break
   }
+  return opts as Partial<Tone.SynthOptions>
 }
+
+// TS can't call a union of constructor types with one options shape, so `cls` is
+// narrowed to a single constructor here.
+type AnySynthClass = typeof Tone.Synth
 
 /** A polyphonic instrument for chords and leads. */
 export function buildPoly(spec: PatchSpec, maxPolyphony: number): Tone.PolySynth {
-  const cls = CLASS[spec.engine] as typeof Tone.Synth
-  const poly = new Tone.PolySynth(cls, toneOptions(spec) as Partial<Tone.SynthOptions>)
+  const poly = new Tone.PolySynth(CLASS[spec.engine] as AnySynthClass, toneOptions(spec))
   poly.maxPolyphony = maxPolyphony
   return poly
 }
@@ -180,6 +188,6 @@ export type MonoVoice = Tone.Synth | Tone.FMSynth | Tone.AMSynth | Tone.MonoSynt
 
 /** A monophonic instrument for bass. */
 export function buildMono(spec: PatchSpec): MonoVoice {
-  const cls = CLASS[spec.engine] as typeof Tone.Synth
-  return new cls(toneOptions(spec) as Partial<Tone.SynthOptions>)
+  const cls = CLASS[spec.engine] as AnySynthClass
+  return new cls(toneOptions(spec))
 }

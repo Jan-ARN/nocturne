@@ -1,7 +1,14 @@
-// Scale tables. Everything is quantized to one of these so randomness always
-// lands on an intentional-sounding note — the core trick that makes generative
-// ambient sound "composed" for free. Pentatonics have no semitone clashes, so
-// any combination of their notes is consonant.
+// Scale tables. Every pitch is quantized to one of these, so random note choices
+// still land somewhere musical. Pentatonics have no semitone clashes, so any
+// combination of their notes is consonant.
+
+/** Semitones in an octave. */
+export const OCTAVE = 12
+
+/** Fold a semitone offset into a pitch class, 0..11 (negative offsets included). */
+export function pitchClass(semitones: number): number {
+  return ((semitones % OCTAVE) + OCTAVE) % OCTAVE
+}
 
 export type ScaleName =
   | 'majorPentatonic'
@@ -14,10 +21,9 @@ export type ScaleName =
   | 'mixolydian'
   | 'phrygian'
 
-// Semitone offsets from the root, one octave's worth. The pentatonics are clash-
-// free; the seven-note modes add characteristic color notes (dorian's bright 6th,
-// phrygian's dark ♭2, mixolydian's ♭7) so melodies have a recognizable flavor
-// instead of always landing on the same safe pentatonic.
+// Semitone offsets from the root, one octave. The pentatonics are clash-free; the
+// seven-note modes add color notes (dorian's bright 6th, phrygian's ♭2,
+// mixolydian's ♭7) that give melodies a recognizable flavor.
 export const SCALES: Record<ScaleName, readonly number[]> = {
   majorPentatonic: [0, 2, 4, 7, 9],
   minorPentatonic: [0, 3, 5, 7, 10],
@@ -82,7 +88,7 @@ export function buildScalePool(
   const pool: number[] = []
   for (let o = 0; o < octaves; o++) {
     for (const interval of intervals) {
-      pool.push(rootMidi + o * 12 + interval)
+      pool.push(rootMidi + o * OCTAVE + interval)
     }
   }
   return pool

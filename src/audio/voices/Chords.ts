@@ -1,21 +1,17 @@
 import * as Tone from 'tone'
 import { midiToFreq } from '../scales'
 import { buildPoly, type PatchSpec } from '../patches'
+import { Voice } from './Voice'
 
 /**
- * The harmonic bed. Plays voiced chords from the progression on whatever
- * instrument this track drew — a warm FM Rhodes, a saw pad, an organ, a choir.
- * Polyphonic so voicings ring and overlap.
+ * The harmonic bed. Plays the progression's voiced chords on whatever instrument
+ * the track drew (Rhodes, saw pad, organ, choir). Polyphonic so voicings ring out.
  */
-export class Chords {
-  private readonly out: Tone.Gain
-  private readonly level: number
+export class Chords extends Voice {
   private readonly synth: Tone.PolySynth
-  private disposed = false
 
   constructor(dest: Tone.InputNode, spec: PatchSpec, level = 0.5) {
-    this.level = level
-    this.out = new Tone.Gain(level).connect(dest)
+    super(dest, level, 1.2)
     this.synth = buildPoly(spec, 32).connect(this.out)
   }
 
@@ -24,18 +20,7 @@ export class Chords {
     this.synth.triggerAttackRelease(midis.map(midiToFreq), duration, time, velocity)
   }
 
-  setMuted(muted: boolean): void {
-    if (this.disposed) return
-    this.out.gain.rampTo(muted ? 0 : this.level, 0.08)
-  }
-
-  dispose(fade = 1.2): void {
-    if (this.disposed) return
-    this.disposed = true
-    this.out.gain.rampTo(0, fade)
-    window.setTimeout(() => {
-      this.synth.dispose()
-      this.out.dispose()
-    }, fade * 1000 + 200)
+  protected disposeNodes(): void {
+    this.synth.dispose()
   }
 }

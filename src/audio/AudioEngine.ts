@@ -8,7 +8,7 @@ import {
   GENRES, makeKit, makeTimbres,
   type DrumKitConfig, type Genre, type GenreId, type GrooveId, type Layer, type TrackTimbres,
 } from './genres'
-import type { ScaleName } from './scales'
+import { pitchClass, type ScaleName } from './scales'
 import type { Energy, NoteEvent, NoteListener, SectionListener } from './events'
 import type { Preset } from '../presets/presets'
 
@@ -23,6 +23,13 @@ export interface TrackInfo {
 }
 
 const FFT_SIZE = 32
+// The analyser reports magnitudes in dB; map this range onto 0..1 for the visual.
+const DB_FLOOR = -100
+const DB_RANGE = 75
+// Split the FFT bins into three bands: bass [0, BASS_BINS), mid [BASS_BINS, MID_BINS),
+// high [MID_BINS, FFT_SIZE).
+const BASS_BINS = 4
+const MID_BINS = 14
 
 /**
  * Owns the whole audio graph and its lifecycle.
@@ -64,7 +71,7 @@ export class AudioEngine {
   private current: Preset | null = null
 
   // Mutable per-track state. The preset seeds these; Shuffle re-rolls them so the
-  // instruments, scale, key and tempo all change — not just the note sequence.
+  // instruments, scale, key and tempo all change, not just the note sequence.
   private genre: Genre = GENRES.lofi
   private scale: ScaleName = 'minorPentatonic'
   private timbres: TrackTimbres = makeTimbres('lofi')
@@ -199,10 +206,9 @@ export class AudioEngine {
   }
 
   /**
-   * Shuffle: re-roll tempo, key, scale AND the instruments within the genre's
-   * ranges, then rebuild the voices so a fresh take really sounds different — new
-   * patches, new palette, not just a new note sequence. Returns the new tempo/key
-   * so the UI can stay in sync.
+   * Shuffle: re-roll tempo, key, scale and instruments within the genre's ranges,
+   * then rebuild the voices so a fresh take sounds genuinely different, not just
+   * re-sequenced. Returns the new tempo and key so the UI can stay in sync.
    */
   skip(): { bpm: number; pitchClass: number } | null {
     if (!this.playing || !this.current) return null
@@ -230,8 +236,8 @@ export class AudioEngine {
     this.scale = preset.scale
     this.bpm = preset.bpm
     const presetRoot = Tone.Frequency(preset.root).toMidi()
-    this.octaveBase = presetRoot - (presetRoot % 12)
-    this.pitchClass = presetRoot % 12
+    this.pitchClass = pitchClass(presetRoot)
+    this.octaveBase = presetRoot - this.pitchClass
     this.timbres = makeTimbres(this.genre.id)
     this.kit = makeKit(this.genre.id)
   }
@@ -284,16 +290,16 @@ export class AudioEngine {
       return this.energy
     }
     const values = this.analyser.getValue() as Float32Array
-    const norm = (db: number) => Math.min(1, Math.max(0, (db + 100) / 75))
+    const norm = (db: number) => Math.min(1, Math.max(0, (db - DB_FLOOR) / DB_RANGE))
     let bass = 0
     let mid = 0
     let high = 0
-    for (let i = 0; i < 4; i++) bass += norm(values[i])
-    for (let i = 4; i < 14; i++) mid += norm(values[i])
-    for (let i = 14; i < values.length; i++) high += norm(values[i])
-    this.energy.bass = bass / 4
-    this.energy.mid = mid / 10
-    this.energy.high = high / (values.length - 14)
+    for (let i = 0; i < BASS_BINS; i++) bass += norm(values[i])
+    for (let i = BASS_BINS; i < MID_BINS; i++) mid += norm(values[i])
+    for (let i = MID_BINS; i < values.length; i++) high += norm(values[i])
+    this.energy.bass = bass / BASS_BINS
+    this.energy.mid = mid / (MID_BINS - BASS_BINS)
+    this.energy.high = high / (values.length - MID_BINS)
     this.energy.level = (this.energy.bass + this.energy.mid + this.energy.high) / 3
     return this.energy
   }

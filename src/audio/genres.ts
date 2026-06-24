@@ -2,11 +2,10 @@ import type { Archetype, PatchSpec } from './patches'
 import { makePatch } from './patches'
 import type { ScaleName } from './scales'
 
-// A genre is the *character* of a track: how it grooves, what tempo and scales it
-// lives in, which instrument archetypes it draws from, how it's mixed and what the
-// visual does. The musical content (progression, melody, structure) is generated;
-// the genre just sets the rules. Adding a genre is almost entirely data — the
-// sequencer branches on a small set of reusable grooves, not on genre id.
+// A genre is the character of a track: its groove, tempo range, scales, instrument
+// pools, mix and visual. The musical content (progression, melody, structure) is
+// generated; the genre just sets the rules. Adding one is almost all data, since
+// the sequencer branches on a handful of shared grooves rather than on genre id.
 
 export type GenreId =
   | 'lofi' | 'boombap' | 'triphop'
@@ -273,7 +272,7 @@ export function makeTimbres(id: GenreId): TrackTimbres {
   const bass = makePatch(choose(g.voices.bass))
   const lead = makePatch(choose(g.voices.lead))
 
-  // Echo garnish on the lead — always for spacious grooves, sometimes elsewhere.
+  // Echo on the lead: always for the spacious grooves, sometimes elsewhere.
   if (g.groove === 'four' || g.groove === 'ambient' || g.groove === 'arp' || Math.random() < 0.3) {
     const times: Array<'8n' | '8n.' | '4n'> = ['8n', '8n.', '4n']
     lead.delay = { time: choose(times), feedback: rand(0.2, 0.42), wet: rand(0.18, 0.36) }
@@ -281,7 +280,7 @@ export function makeTimbres(id: GenreId): TrackTimbres {
   return { chord, bass, lead }
 }
 
-/** A fresh drum voicing — tuning, brightness and decay drift around the genre kit. */
+/** A fresh drum voicing: tuning, brightness and decay drift around the genre kit. */
 export function makeKit(id: GenreId): DrumKitConfig {
   const base = GENRES[id].kit
   return {

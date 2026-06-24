@@ -1,5 +1,5 @@
 import * as Tone from 'tone'
-import { buildScalePool, type ScaleName } from './scales'
+import { buildScalePool, OCTAVE, pitchClass, type ScaleName } from './scales'
 import {
   developMotif,
   generateArrangement,
@@ -37,8 +37,9 @@ export interface SequencerSources {
   onSection: (name: string) => void
 }
 
-const CHORD_OCTAVE = 12
-const MELODY_LOW = 24
+// Chords sit one octave above the key root; the melody two octaves above, spanning two.
+const CHORD_OCTAVE = OCTAVE
+const MELODY_LOW = 2 * OCTAVE
 const MELODY_OCTAVES = 2
 
 // Regenerate harmony, theme and drum skeleton every phrase; develop the theme bar by bar.
@@ -62,13 +63,10 @@ const DNB_BASS: Record<number, Tone.Unit.Time> = { 0: '4n', 6: '8n', 10: '8n', 1
 type ArpDir = 'up' | 'down' | 'updown'
 
 /**
- * The groove. A 16-step bar drives the drums; a measure loop walks a procedurally
- * generated arrangement and asks the composer for fresh, voiced progressions and a
- * developing melodic theme every phrase. Rhythm is dispatched on the genre's
- * *groove* (beats / four-on-floor / arp / breakbeat / ambient), so genres are
- * mostly data. Because the material — structure, harmony, theme, percussion,
- * instruments — all regenerates, and Shuffle re-rolls tempo/key/scale/patches, a
- * long session never settles into the same loop.
+ * The groove engine. A 16-step sequence drives the drums; a measure loop walks the
+ * arrangement and pulls fresh progressions and a developing theme from the composer
+ * each phrase. Per-step rhythm is dispatched on the genre's groove (beats /
+ * four-on-floor / arp / breakbeat / ambient), so most of a genre is just data.
  */
 export class Sequencer {
   private measureLoop: Tone.Loop | null = null
@@ -124,10 +122,7 @@ export class Sequencer {
     this.rebuildPool()
   }
 
-  /**
-   * Voice the opening chord/bass right now. Called just after a fresh Sequencer is
-   * built on Shuffle, so the new track is instantly audible.
-   */
+  /** Sound the opening chord and bass right away, so a freshly built track is audible at once. */
   prime(): void {
     const t = Tone.now() + 0.03
     const dur: Tone.Unit.Time = this.groove === 'beats' ? '2n' : '1m'
@@ -169,15 +164,15 @@ export class Sequencer {
     const pcs = new Set(chord.pitchClasses)
     this.chordToneIdx = []
     for (let i = 0; i < this.melodyPool.length; i++) {
-      if (pcs.has((((this.melodyPool[i] - this.root) % 12) + 12) % 12)) this.chordToneIdx.push(i)
+      if (pcs.has(pitchClass(this.melodyPool[i] - this.root))) this.chordToneIdx.push(i)
     }
 
     const arp = new Set<number>()
     const arpBase = this.root + MELODY_LOW + this.melodyOctave
     for (const o of chord.offsets) {
-      const pc = ((o % 12) + 12) % 12
+      const pc = pitchClass(o)
       arp.add(arpBase + pc)
-      arp.add(arpBase + 12 + pc)
+      arp.add(arpBase + OCTAVE + pc)
     }
     this.arpNotes = [...arp].sort((a, b) => a - b)
   }
@@ -346,7 +341,7 @@ export class Sequencer {
       if (perc.conga) {
         const cg = this.conga[step]
         if (cg !== undefined && (d > 0.3 || Math.random() < 0.5)) {
-          this.src.drums.conga(this.root + 12 + cg, time + Math.random() * 0.008, 0.45 + Math.random() * 0.2)
+          this.src.drums.conga(this.root + OCTAVE + cg, time + Math.random() * 0.008, 0.45 + Math.random() * 0.2)
         }
       }
       if (perc.clave && CLAVE_STEPS.has(step) && d > 0.4) {

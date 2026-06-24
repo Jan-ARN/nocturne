@@ -11,8 +11,8 @@ import { Macros } from './components/Macros'
 import { Shape } from './components/Shape'
 import { DEFAULT_PRESET, PRESETS, presetsByGenre, type Preset } from './presets/presets'
 
-// Hands-free evolution: while Auto is on, reshuffle to fresh material on this
-// cadence so a long session keeps moving without a click.
+// While Auto is on, reshuffle to fresh material on this cadence so a long session
+// keeps moving without a click.
 const AUTO_EVOLVE_MS = 95_000
 
 function prefersReducedMotion(): boolean {
@@ -126,8 +126,7 @@ export default function App() {
     if (first) loadPreset(first)
   }
 
-  // Shuffle: a fresh take of the *current* genre — new instruments, scale, key,
-  // tempo, structure. The core "never the same twice" action.
+  // Shuffle: a fresh take of the current genre — new instruments, scale, key, tempo.
   const doShuffle = () => {
     const rolled = engineRef.current?.skip()
     if (rolled) {
@@ -140,7 +139,7 @@ export default function App() {
     if (playing) doShuffle()
   }
 
-  // Surprise: jump to a random preset from *any* genre.
+  // Surprise: jump to a random preset from any genre.
   const handleSurprise = () => {
     const pool = PRESETS.filter((p) => p.id !== preset.id)
     loadPreset(pool[Math.floor(Math.random() * pool.length)])
